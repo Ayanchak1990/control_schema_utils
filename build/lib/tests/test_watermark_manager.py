@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import MagicMock
 from datetime import datetime, timezone
 
+import pytest
+
 from quper_control_schema_utils.watermark_manager import get_watermark, update_watermark
 from quper_control_schema_utils.exceptions import WatermarkError
 
@@ -69,6 +71,35 @@ class TestUpdateWatermark(unittest.TestCase):
 
         with self.assertRaises(WatermarkError):
             update_watermark(mock_spark, "dev", "cdm", "obj-001", "pipe-001", "run-001", 1000)
+
+
+@pytest.mark.parametrize("object_id,pipeline_id", [
+    ("obj-001", "pipe-001"),
+    ("obj-invoices", "pipe-finance"),
+    ("obj-timecards", "pipe-hr"),
+])
+def test_get_watermark_embeds_ids_in_sql(object_id, pipeline_id):
+    """get_watermark must pass object_id and pipeline_id into the SQL query."""
+    mock_spark = MagicMock()
+    mock_spark.sql.return_value.collect.return_value = []
+    get_watermark(mock_spark, "dev", "cdm", object_id, pipeline_id)
+    sql = mock_spark.sql.call_args[0][0]
+    assert object_id in sql
+    assert pipeline_id in sql
+
+
+@pytest.mark.parametrize("object_id,pipeline_id", [
+    ("obj-001", "pipe-001"),
+    ("obj-invoices", "pipe-finance"),
+    ("obj-timecards", "pipe-hr"),
+])
+def test_update_watermark_embeds_ids_in_sql(object_id, pipeline_id):
+    """update_watermark must pass object_id and pipeline_id into the MERGE SQL."""
+    mock_spark = MagicMock()
+    update_watermark(mock_spark, "dev", "cdm", object_id, pipeline_id, "run-x", 42)
+    sql = mock_spark.sql.call_args[0][0]
+    assert object_id in sql
+    assert pipeline_id in sql
 
 
 if __name__ == "__main__":

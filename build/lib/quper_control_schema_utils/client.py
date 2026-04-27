@@ -209,6 +209,8 @@ class ControlSchemaClient:
         object_id: str,
         run_id: str,
         rows_loaded: int,
+        watermark_col= None,
+        new_watermark=None,
     ) -> None:
         """
         MERGE INTO watermark_control on (object_id + pipeline_id).
@@ -216,9 +218,12 @@ class ControlSchemaClient:
         Only call this after a confirmed successful write — never before.
 
         Args:
-            object_id:   Source object identifier.
-            run_id:      Current run identifier.
-            rows_loaded: Number of rows loaded in this run.
+            object_id:      Source object identifier.
+            run_id:         Current run identifier.
+            rows_loaded:    Number of rows loaded in this run.
+            watermark_col:  Name of the watermark column used for this run.
+            new_watermark:  MAX(watermark_column) captured from source data.
+                            Stored in watermark_col_value; NULL when not supplied.
 
         Returns:
             None.
@@ -228,14 +233,16 @@ class ControlSchemaClient:
         """
         watermark_manager.update_watermark(
             self.spark, self.catalog, self.control_schema,
-            object_id, self.pipeline_id, run_id, rows_loaded
+            object_id, self.pipeline_id, run_id, rows_loaded,
+            watermark_col=watermark_col, new_watermark=new_watermark,
         )
 
     # ── Audit ────────────────────────────────────────────────────────────────
 
     def start_run(
         self,
-        triggered_by: str = "manual",
+        triggered_by: str = "unknown",
+        triggered_mode: str = "manual",
         job_id: Optional[str] = None,
         job_run_id: Optional[str] = None,
     ) -> str:
@@ -243,9 +250,10 @@ class ControlSchemaClient:
         INSERT row into job_run_audit with status='RUNNING'.
 
         Args:
-            triggered_by: Trigger type: 'schedule', 'manual', or 'api'.
-            job_id:       Optional Databricks job ID.
-            job_run_id:   Optional Databricks job run ID.
+            triggered_by:   Email of the user who triggered the run, or 'unknown'.
+            triggered_mode: 'schedule' if run via Databricks job, 'manual' otherwise.
+            job_id:         Optional Databricks job ID.
+            job_run_id:     Optional Databricks job run ID.
 
         Returns:
             run_id (UUID string).
@@ -255,7 +263,7 @@ class ControlSchemaClient:
         """
         return audit_logger.log_run_start(
             self.spark, self.catalog, self.control_schema,
-            self.pipeline_id, self.environment, triggered_by, job_id, job_run_id
+            self.pipeline_id, self.environment, triggered_by, triggered_mode, job_id, job_run_id
         )
 
     def end_run(
@@ -500,4 +508,37 @@ class ControlSchemaClient:
         """
         dq_runner.log_dq_results(
             self.spark, self.catalog, self.control_schema, results
+        )
+
+    def quarantine_failed_records(
+        self,
+        run_id: str,
+        object_id: str,
+        source_object: str,
+        df: Any,
+        rules: Any,
+        dq_results: Any,
+    ):
+        """
+        Split df into clean records and quarantine records for WARNING-severity failures.
+
+        Failing rows (NOT_NULL / RANGE rule violations) are written to dq_quarantine
+        with rejection metadata.  The returned DataFrame contains only clean records
+        and is safe to pass directly to the merge writer.
+
+        Args:
+            run_id:        Current run identifier.
+            object_id:     Source object identifier.
+            source_object: Source object name (e.g. "yellow_tripdata").
+            df:            Enriched DataFrame (post-metadata injection).
+            rules:         DQRule list evaluated this run.
+            dq_results:    DQResult list from run_dq_checks() for this run.
+
+        Returns:
+            Tuple of (clean_df, rows_rejected).
+        """
+        return dq_runner.split_and_quarantine(
+            self.spark, self.catalog, self.control_schema,
+            run_id, self.pipeline_id, object_id, source_object,
+            df, rules, dq_results, self.environment,
         )

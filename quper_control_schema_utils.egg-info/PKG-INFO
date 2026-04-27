@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: quper_control_schema_utils
-Version: 0.1.0
+Version: 0.2.0
 Summary: Generic control schema utilities for Databricks ingestion pipelines
 Author: Quper
 Description-Content-Type: text/markdown

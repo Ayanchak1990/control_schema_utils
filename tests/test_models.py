@@ -2,6 +2,9 @@
 
 import unittest
 from datetime import datetime, timezone
+
+import pytest
+
 from quper_control_schema_utils.models import (
     SourceObject, WatermarkEntry, PipelineConfigEntry, RunAudit,
     RunError, IngestionMetrics, SchemaColumn, SchemaDrift,
@@ -319,6 +322,83 @@ class TestConnectionConfig(unittest.TestCase):
         )
         self.assertEqual(conn.source_system, "sqlserver")
         self.assertIsNone(conn.extra_jdbc_options)
+
+
+@pytest.mark.parametrize("object_id,pipeline_id", [
+    ("obj-001", "pipe-001"),
+    ("obj-invoices", "pipe-finance"),
+    ("obj-timecards", "pipe-hr"),
+])
+def test_source_object_stores_ids(object_id, pipeline_id):
+    """SourceObject must store whatever object_id and pipeline_id are supplied."""
+    now = datetime.now(timezone.utc)
+    obj = SourceObject(
+        object_id=object_id,
+        pipeline_id=pipeline_id,
+        source_system="sqlserver",
+        source_schema="dbo",
+        source_object="vw_data",
+        target_catalog="dev",
+        target_schema="raw",
+        target_table="data",
+        staging_table=None,
+        load_type="full_load",
+        write_mode="overwrite",
+        primary_key="id",
+        watermark_column=None,
+        hash_columns=None,
+        active_flag=True,
+        load_order=1,
+        created_at=now,
+        updated_at=now,
+        created_by="admin",
+        updated_by="admin",
+    )
+    assert obj.object_id == object_id
+    assert obj.pipeline_id == pipeline_id
+
+
+@pytest.mark.parametrize("object_id,pipeline_id", [
+    ("obj-001", "pipe-001"),
+    ("obj-invoices", "pipe-finance"),
+    ("obj-timecards", "pipe-hr"),
+])
+def test_watermark_entry_stores_ids(object_id, pipeline_id):
+    """WatermarkEntry must store whatever object_id and pipeline_id are supplied."""
+    now = datetime.now(timezone.utc)
+    wm = WatermarkEntry(
+        object_id=object_id,
+        pipeline_id=pipeline_id,
+        last_run_ts=now,
+        last_run_id="run-abc",
+        rows_last_loaded=100,
+        updated_at=now,
+    )
+    assert wm.object_id == object_id
+    assert wm.pipeline_id == pipeline_id
+
+
+@pytest.mark.parametrize("object_id,pipeline_id", [
+    ("obj-001", "pipe-001"),
+    ("obj-invoices", "pipe-finance"),
+    ("obj-timecards", "pipe-hr"),
+])
+def test_dq_rule_stores_ids(object_id, pipeline_id):
+    """DQRule must store whatever object_id and pipeline_id are supplied."""
+    rule = DQRule(
+        rule_id="dq-x",
+        object_id=object_id,
+        pipeline_id=pipeline_id,
+        rule_name="not_null_id",
+        rule_type="NOT_NULL",
+        column_name="id",
+        rule_expression=None,
+        expected_value=None,
+        severity="ERROR",
+        active_flag=True,
+    )
+    assert rule.object_id == object_id
+    assert rule.pipeline_id == pipeline_id
 
 
 if __name__ == "__main__":

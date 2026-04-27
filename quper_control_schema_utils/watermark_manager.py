@@ -4,11 +4,11 @@ Watermark manager for quper_control_schema_utils.
 Handles read and write operations against the watermark_control table.
 """
 
+import hashlib
 import logging
-import traceback
 from typing import Any, Optional
 
-from quper_control_schema_utils._internal import _escape_sql
+from quper_control_schema_utils._internal import _escape_sql, _raise_error
 from quper_control_schema_utils.exceptions import WatermarkError
 from quper_control_schema_utils.models import TableName, WatermarkEntry
 
@@ -69,13 +69,13 @@ def get_watermark(
             rows_last_loaded=r["rows_last_loaded"],
             updated_at=r["updated_at"],
             watermark_col = r["watermark_col"],
+            watermark_col_value=r["watermark_col_value"],
             watermark_col_hash = r["watermark_col_hash"]
 
         )
 
     except Exception as e:
-        logger.error( f"[pipeline={pipeline_id}, object={object_id}] Failed to read watermark: {e}\n{traceback.format_exc()}")
-        raise WatermarkError(f"Failed to read watermark for object={object_id}, pipeline={pipeline_id}: {e}") from e
+        _raise_error(logger, f"pipeline={pipeline_id}, object={object_id}", "Failed to read watermark", e, WatermarkError)
 
 
 def update_watermark(
@@ -87,11 +87,13 @@ def update_watermark(
     run_id: str,
     rows_loaded: int,
     new_watermark=None,
+    watermark_col: Optional[str] = None,
 ) -> None:
     """
     Merge into watermark_control on (object_id + pipeline_id).
 
-    WHEN MATCHED: update last_run_ts, last_run_id, rows_last_loaded, updated_at.
+    WHEN MATCHED: update last_run_ts, last_run_id, rows_last_loaded, updated_at,
+                  watermark_col, watermark_col_hash.
     WHEN NOT MATCHED: insert full row.
 
     Only call this after a confirmed successful write — never before.
@@ -104,10 +106,13 @@ def update_watermark(
         pipeline_id:    Pipeline identifier.
         run_id:         Current run identifier.
         rows_loaded:    Number of rows loaded in this run.
-        new_watermark:  MAX(watermark_column) captured from source data before the read.
-                        When provided, stored as last_run_ts so the next incremental
-                        window starts from the actual data upper bound rather than
-                        wall-clock time.  Falls back to current_timestamp() if None.
+        new_watermark:  MAX(watermark_column) captured from source data.
+                        When provided, stored in watermark_col_value (as a string)
+                        and watermark_col_hash = SHA256(str(new_watermark)).
+                        Both are stored as NULL when not supplied.
+                        last_run_ts is always current_timestamp(), regardless.
+        watermark_col:  Name of the watermark column used for this run.
+                        Stored as-is; NULL when not supplied.
 
     Returns:
         None.
@@ -120,12 +125,16 @@ def update_watermark(
     safe_pid = _escape_sql(pipeline_id)
     safe_rid = _escape_sql(run_id)
 
-    # Use the actual MAX from source data when available; fall back to wall-clock
-    # only as a safety net (e.g. cold-start with no watermark column).
+    # last_run_ts is always wall-clock; new_watermark is stored separately.
+    # Hash is computed in Python only when new_watermark is available (no Spark dependency).
     if new_watermark is not None:
-        wm_sql = f"CAST('{new_watermark}' AS TIMESTAMP)"
+        wm_value_sql = f"'{_escape_sql(str(new_watermark))}'"
+        wm_hash_sql = f"'{hashlib.sha256(str(new_watermark).encode()).hexdigest()}'"
     else:
-        wm_sql = "current_timestamp()"
+        wm_value_sql = "NULL"
+        wm_hash_sql = "NULL"
+
+    wm_col_sql = f"'{_escape_sql(watermark_col)}'" if watermark_col is not None else "NULL"
 
     logger.info( f"[pipeline={pipeline_id}, object={object_id}] Updating watermark in {table}")
     try:
@@ -139,20 +148,23 @@ def update_watermark(
             ON target.object_id = source.object_id
                AND target.pipeline_id = source.pipeline_id
             WHEN MATCHED THEN UPDATE SET
-                last_run_ts = {wm_sql},
+                last_run_ts = current_timestamp(),
                 last_run_id = '{safe_rid}',
                 rows_last_loaded = {rows_loaded},
-                updated_at = current_timestamp()
+                updated_at = current_timestamp(),
+                watermark_col = {wm_col_sql},
+                watermark_col_value = {wm_value_sql},
+                watermark_col_hash = {wm_hash_sql}
             WHEN NOT MATCHED THEN INSERT
                 (object_id, pipeline_id, last_run_ts, last_run_id,
-                 rows_last_loaded, updated_at)
+                 rows_last_loaded, updated_at, watermark_col, watermark_col_value, watermark_col_hash)
             VALUES
-                ('{safe_oid}', '{safe_pid}', {wm_sql},
-                 '{safe_rid}', {rows_loaded}, current_timestamp())
+                ('{safe_oid}', '{safe_pid}', current_timestamp(),
+                 '{safe_rid}', {rows_loaded}, current_timestamp(),
+                 {wm_col_sql}, {wm_value_sql}, {wm_hash_sql})
         """
         spark.sql(query)
-        logger.info( f"[pipeline={pipeline_id}, object={object_id}] Watermark updated: run={run_id}, rows={rows_loaded}, last_run_ts={new_watermark or 'current_timestamp()'}")
+        logger.info( f"[pipeline={pipeline_id}, object={object_id}] Watermark updated: run={run_id}, rows={rows_loaded}, watermark_col={watermark_col}, watermark_col_value={new_watermark}")
 
     except Exception as e:
-        logger.error( f"[pipeline={pipeline_id}, object={object_id}] Failed to update watermark: {e}\n{traceback.format_exc()}")
-        raise WatermarkError(f"Failed to update watermark for object={object_id}, pipeline={pipeline_id}: {e}") from e
+        _raise_error(logger, f"pipeline={pipeline_id}, object={object_id}", "Failed to update watermark", e, WatermarkError)

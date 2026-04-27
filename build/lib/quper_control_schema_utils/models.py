@@ -90,6 +90,7 @@ class TableName:
     INGESTION_METRICS: str = "ingestion_metrics"
     SCHEMA_DRIFT_LOG: str = "schema_drift_log"
     DQ_CHECK_RESULTS: str = "dq_check_results"
+    DQ_QUARANTINE: str = "dq_quarantine"
 
 
 # ── Dataclasses ────────────────────────────────────────────────────────────────
@@ -132,6 +133,9 @@ class WatermarkEntry:
     last_run_id: Optional[str]
     rows_last_loaded: Optional[int]
     updated_at: datetime
+    watermark_col: Optional[str]
+    watermark_col_value: Optional[str]
+    watermark_col_hash: Optional[str]
 
 
 @dataclass
@@ -155,6 +159,7 @@ class RunAudit:
     job_id: Optional[str]
     job_run_id: Optional[str]
     triggered_by: str
+    triggered_mode: str
     start_time: datetime
     end_time: Optional[datetime]
     duration_seconds: Optional[int]

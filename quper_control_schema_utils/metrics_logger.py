@@ -6,10 +6,9 @@ This module must NEVER raise.
 """
 
 import logging
-import traceback
 from typing import Any
 
-from quper_control_schema_utils._internal import _escape_sql
+from quper_control_schema_utils._internal import _escape_sql, _swallow_error
 from quper_control_schema_utils.models import IngestionMetrics, TableName
 
 logger = logging.getLogger(__name__)
@@ -72,4 +71,4 @@ def log_metrics(spark: Any, catalog: str, control_schema: str, metrics: Ingestio
         logger.info( f"[pipeline={metrics.pipeline_id}, object={metrics.source_object}] Metrics logged: status={metrics.status}")
 
     except Exception as e:
-        logger.warning( f"[pipeline={metrics.pipeline_id}, object={metrics.source_object}] Failed to log metrics: {e}\n{traceback.format_exc()}")
+        _swallow_error(logger, f"pipeline={metrics.pipeline_id}, object={metrics.source_object}", "Failed to log metrics", e)

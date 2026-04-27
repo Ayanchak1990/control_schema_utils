@@ -3,6 +3,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from quper_control_schema_utils.audit_logger import log_run_start, log_run_end
 from quper_control_schema_utils.exceptions import AuditLogError
 
@@ -49,6 +51,36 @@ class TestLogRunEnd(unittest.TestCase):
         mock_spark.sql.side_effect = Exception("Connection failed")
         # Must never raise
         log_run_end(mock_spark, "dev", "cdm", "run-001", "FAILED", 5, 0, 5)
+
+
+@pytest.mark.parametrize("pipeline_id,environment", [
+    ("pipe-001", "dev"),
+    ("pipe-finance", "qa"),
+    ("pipe-hr-nightly", "prod"),
+])
+def test_log_run_start_embeds_pipeline_id_in_sql(pipeline_id, environment):
+    """log_run_start must embed pipeline_id in the INSERT statement."""
+    mock_spark = MagicMock()
+    run_id = log_run_start(
+        mock_spark, "dev", "cdm", pipeline_id, environment, "schedule", None, None
+    )
+    assert isinstance(run_id, str) and len(run_id) == 36
+    sql = mock_spark.sql.call_args[0][0]
+    assert pipeline_id in sql
+
+
+@pytest.mark.parametrize("run_id,status", [
+    ("run-001", "SUCCESS"),
+    ("run-finance-99", "FAILED"),
+    ("run-hr-42", "PARTIAL"),
+])
+def test_log_run_end_embeds_run_id_and_status_in_sql(run_id, status):
+    """log_run_end must embed run_id and status in the MERGE statement."""
+    mock_spark = MagicMock()
+    log_run_end(mock_spark, "dev", "cdm", run_id, status, 3, 2, 1)
+    sql = mock_spark.sql.call_args[0][0]
+    assert run_id in sql
+    assert status in sql
 
 
 if __name__ == "__main__":

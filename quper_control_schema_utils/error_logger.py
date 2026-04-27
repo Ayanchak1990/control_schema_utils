@@ -6,11 +6,10 @@ NEVER raise — logging a failure must never crash the pipeline.
 """
 
 import logging
-import traceback
 import uuid
 from typing import Any
 
-from quper_control_schema_utils._internal import _escape_sql
+from quper_control_schema_utils._internal import _escape_sql, _swallow_error
 from quper_control_schema_utils.models import TableName
 
 logger = logging.getLogger(__name__)
@@ -82,4 +81,4 @@ def log_error(
         logger.info( f"[pipeline={pipeline_id}, object={source_object}] Error logged: error_id={error_id}, type={error_type}")
 
     except Exception as e:
-        logger.warning( f"[pipeline={pipeline_id}, object={source_object}] Failed to log error: {e}\n{traceback.format_exc()}")
+        _swallow_error(logger, f"pipeline={pipeline_id}, object={source_object}", "Failed to log error", e)

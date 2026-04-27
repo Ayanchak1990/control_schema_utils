@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
+import pytest
+
 from quper_control_schema_utils.config_reader import (
     get_source_objects,
     get_pipeline_config,
@@ -186,6 +188,49 @@ class TestGetConnectionConfig(unittest.TestCase):
 
         with self.assertRaises(ConnectionConfigError):
             get_connection_config(mock_spark, "dev", "cdm", "pipe-001")
+
+
+@pytest.mark.parametrize("pipeline_id", [
+    "pipe-001",
+    "pipe-finance",
+    "pipe-hr-nightly",
+])
+def test_get_source_objects_embeds_pipeline_id_in_sql(pipeline_id):
+    """get_source_objects must scope its query to the supplied pipeline_id."""
+    mock_spark = MagicMock()
+    mock_spark.sql.return_value.collect.return_value = []
+    get_source_objects(mock_spark, "dev", "cdm", pipeline_id)
+    sql = mock_spark.sql.call_args[0][0]
+    assert pipeline_id in sql
+
+
+@pytest.mark.parametrize("pipeline_id,object_id", [
+    ("pipe-001", "obj-001"),
+    ("pipe-finance", "obj-invoices"),
+    ("pipe-hr", "obj-timecards"),
+])
+def test_get_dq_rules_embeds_ids_in_sql(pipeline_id, object_id):
+    """get_dq_rules must scope its query to both pipeline_id and object_id."""
+    mock_spark = MagicMock()
+    mock_spark.sql.return_value.collect.return_value = []
+    get_dq_rules(mock_spark, "dev", "cdm", pipeline_id, object_id)
+    sql = mock_spark.sql.call_args[0][0]
+    assert pipeline_id in sql
+    assert object_id in sql
+
+
+@pytest.mark.parametrize("pipeline_id", [
+    "pipe-001",
+    "pipe-finance",
+    "pipe-hr-nightly",
+])
+def test_get_pipeline_config_embeds_pipeline_id_in_sql(pipeline_id):
+    """get_pipeline_config must scope its query to the supplied pipeline_id."""
+    mock_spark = MagicMock()
+    mock_spark.sql.return_value.collect.return_value = []
+    get_pipeline_config(mock_spark, "dev", "cdm", pipeline_id)
+    sql = mock_spark.sql.call_args[0][0]
+    assert pipeline_id in sql
 
 
 if __name__ == "__main__":

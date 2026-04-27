@@ -6,7 +6,6 @@ dq_check_results table.
 """
 
 import logging
-import traceback
 import uuid
 from datetime import datetime, timezone
 from typing import Any, List, Tuple
@@ -14,7 +13,7 @@ from typing import Any, List, Tuple
 from pyspark.sql.functions import col, current_timestamp, expr, lit, struct, to_json
 from pyspark.sql.functions import expr as spark_expr
 
-from quper_control_schema_utils._internal import _escape_sql
+from quper_control_schema_utils._internal import _escape_sql, _swallow_error
 from quper_control_schema_utils.exceptions import DQFailureError
 from quper_control_schema_utils.models import (
     DQAction,
@@ -222,8 +221,8 @@ def log_dq_results(
         logger.info(f"[pipeline={first.pipeline_id}, object={first.object_id}] Logged {len(results)} DQ result(s)")
 
     except Exception as e:
-        context = f"pipeline={results[0].pipeline_id}, object={results[0].object_id}" if results else "unknown"
-        logger.warning(f"[{context}] Failed to log DQ results: {e}\n{traceback.format_exc()}")
+        ctx = f"pipeline={results[0].pipeline_id}, object={results[0].object_id}" if results else "unknown"
+        _swallow_error(logger, ctx, "Failed to log DQ results", e)
 
 
 def split_and_quarantine(
@@ -350,9 +349,6 @@ def split_and_quarantine(
         )
 
     except Exception as e:
-        logger.warning(
-            f"[pipeline={pipeline_id}, object={object_id}] "
-            f"Failed to write quarantine records — pipeline continues: {e}\n{traceback.format_exc()}"
-        )
+        _swallow_error(logger, f"pipeline={pipeline_id}, object={object_id}", "Failed to write quarantine records — pipeline continues", e)
 
     return clean_df, rows_rejected

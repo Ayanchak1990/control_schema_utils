@@ -6,14 +6,14 @@ dq_check_results table.
 """
 
 import logging
-import traceback
 import uuid
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import Any, List, Tuple
 
-from pyspark.sql.functions import col, expr
+from pyspark.sql.functions import col, current_timestamp, expr, lit, struct, to_json
+from pyspark.sql.functions import expr as spark_expr
 
-from quper_control_schema_utils._internal import _escape_sql
+from quper_control_schema_utils._internal import _escape_sql, _swallow_error
 from quper_control_schema_utils.exceptions import DQFailureError
 from quper_control_schema_utils.models import (
     DQAction,
@@ -221,5 +221,134 @@ def log_dq_results(
         logger.info(f"[pipeline={first.pipeline_id}, object={first.object_id}] Logged {len(results)} DQ result(s)")
 
     except Exception as e:
-        context = f"pipeline={results[0].pipeline_id}, object={results[0].object_id}" if results else "unknown"
-        logger.warning(f"[{context}] Failed to log DQ results: {e}\n{traceback.format_exc()}")
+        ctx = f"pipeline={results[0].pipeline_id}, object={results[0].object_id}" if results else "unknown"
+        _swallow_error(logger, ctx, "Failed to log DQ results", e)
+
+
+def split_and_quarantine(
+    spark: Any,
+    catalog: str,
+    control_schema: str,
+    run_id: str,
+    pipeline_id: str,
+    object_id: str,
+    source_object: str,
+    df: Any,
+    rules: List[DQRule],
+    dq_results: List[DQResult],
+    environment: str,
+) -> Tuple[Any, int]:
+    """
+    Split df into clean records and quarantine records based on WARN-severity DQ results.
+
+    For each WARNING-severity rule that produced row-level failures (NOT_NULL, RANGE),
+    failing rows are written to the dq_quarantine table with rejection metadata attached.
+    The returned DataFrame contains only records that passed all WARNING rules, and is
+    safe to pass directly to the merge writer.
+
+    ROW_COUNT rules are aggregate checks — they have no individual rows to quarantine
+    and are skipped by this function.
+
+    ERROR-severity rules are not processed here — they halt the pipeline via
+    DQFailureError before this function is reached.
+
+    This function must never raise: a quarantine write failure is logged as a WARNING
+    and the clean DataFrame is returned unchanged so the main pipeline is not blocked.
+
+    Args:
+        spark:          Active SparkSession.
+        catalog:        Unity Catalog name.
+        control_schema: Control schema name.
+        run_id:         Current run identifier.
+        pipeline_id:    Pipeline identifier.
+        object_id:      Source object identifier.
+        source_object:  Source object name (e.g. "yellow_tripdata").
+        df:             Enriched DataFrame (post-metadata injection).
+        rules:          DQRule list evaluated this run.
+        dq_results:     DQResult list from run_dq_checks() for this run.
+        environment:    Deployment environment.
+
+    Returns:
+        Tuple of (clean_df, rows_rejected):
+            clean_df      — DataFrame with all WARNING-rule violations removed.
+            rows_rejected — Count of unique rows removed from df.
+    """
+    # Index results by rule_id for O(1) lookup
+    result_by_rule_id = {r.rule_id: r for r in dq_results}
+
+    quarantine_parts: List[Any] = []
+    clean_df = df
+
+    for rule in rules:
+        result = result_by_rule_id.get(rule.rule_id)
+        if result is None or result.rows_failed == 0:
+            continue
+        if rule.severity != Severity.WARNING:
+            continue  # ERROR rules already halted the pipeline before this point
+        if rule.rule_type == "ROW_COUNT":
+            continue  # aggregate check — no individual rows to quarantine
+
+        if rule.rule_type == "NOT_NULL":
+            fail_filter = col(rule.column_name).isNull()
+        elif rule.rule_type == "RANGE":
+            fail_filter = ~expr(rule.rule_expression)
+        else:
+            logger.warning(
+                f"[pipeline={pipeline_id}, object={object_id}] "
+                f"Cannot quarantine rows for unknown rule_type '{rule.rule_type}' "
+                f"on rule '{rule.rule_name}' — skipping"
+            )
+            continue
+
+        quarantine_part = (
+            df.filter(fail_filter)
+            .select(
+                spark_expr("uuid()").alias("quarantine_id"),
+                lit(run_id).alias("run_id"),
+                lit(pipeline_id).alias("pipeline_id"),
+                lit(object_id).alias("object_id"),
+                lit(source_object).alias("source_table"),
+                lit(rule.rule_id).alias("rule_id"),
+                lit(rule.rule_name).alias("rule_name"),
+                lit(f"{rule.rule_type} violation: {rule.rule_name}").alias("rejection_reason"),
+                current_timestamp().alias("rejected_at"),
+                to_json(struct([col(c) for c in df.columns])).alias("raw_record"),
+                lit(environment).alias("environment"),
+            )
+        )
+        quarantine_parts.append(quarantine_part)
+
+        # Remove failing rows from the clean path
+        clean_df = clean_df.filter(~fail_filter)
+
+    if not quarantine_parts:
+        return df, 0
+
+    rows_rejected = df.count() - clean_df.count()
+
+    try:
+        from functools import reduce
+        quarantine_df = reduce(lambda a, b: a.unionAll(b), quarantine_parts)
+
+        quarantine_table = f"{catalog}.{control_schema}.{TableName.DQ_QUARANTINE}"
+        if not spark.catalog.tableExists(quarantine_table):
+            (
+                quarantine_df.limit(0)
+                .write.format("delta")
+                .option("delta.autoOptimize.optimizeWrite", "true")
+                .option("delta.autoOptimize.autoCompact", "true")
+                .mode("ignore")
+                .saveAsTable(quarantine_table)
+            )
+
+        quarantine_df.write.format("delta").mode("append").saveAsTable(quarantine_table)
+
+        logger.info(
+            f"[pipeline={pipeline_id}, object={object_id}] "
+            f"Quarantined {rows_rejected} row(s) to {quarantine_table}"
+        )
+
+    except Exception as e:
+        _swallow_error(logger, f"pipeline={pipeline_id}, object={object_id}", "Failed to write quarantine records — pipeline continues", e)
+
+    return clean_df, rows_rejected

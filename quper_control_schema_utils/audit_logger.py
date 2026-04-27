@@ -5,11 +5,10 @@ Handles INSERT and MERGE operations against the job_run_audit table.
 """
 
 import logging
-import traceback
 import uuid
 from typing import Any, Optional
 
-from quper_control_schema_utils._internal import _escape_sql
+from quper_control_schema_utils._internal import _escape_sql, _raise_error, _swallow_error
 from quper_control_schema_utils.exceptions import AuditLogError
 from quper_control_schema_utils.models import Status, TableName
 
@@ -23,6 +22,7 @@ def log_run_start(
     pipeline_id: str,
     environment: str,
     triggered_by: str,
+    triggered_mode: str,
     job_id: Optional[str],
     job_run_id: Optional[str],
 ) -> str:
@@ -35,7 +35,8 @@ def log_run_start(
         control_schema: Control schema name.
         pipeline_id:    Pipeline identifier.
         environment:    Deployment environment.
-        triggered_by:   Trigger type: 'schedule', 'manual', or 'api'.
+        triggered_by:   Email of the user who triggered the run, or 'unknown'.
+        triggered_mode: 'schedule' if run via Databricks job, 'manual' otherwise.
         job_id:         Optional Databricks job ID.
         job_run_id:     Optional Databricks job run ID.
 
@@ -54,19 +55,20 @@ def log_run_start(
     safe_pid = _escape_sql(pipeline_id)
     safe_env = _escape_sql(environment)
     safe_trigger = _escape_sql(triggered_by)
+    safe_triggered_mode = _escape_sql(triggered_mode)
     job_id_val = f"'{_escape_sql(job_id)}'" if job_id else "NULL"
     job_run_id_val = f"'{_escape_sql(job_run_id)}'" if job_run_id else "NULL"
 
     try:
         query = f"""
             INSERT INTO {table}
-            (run_id, pipeline_id, job_id, job_run_id, triggered_by,
+            (run_id, pipeline_id, job_id, job_run_id, triggered_by, triggered_mode,
              start_time, end_time, duration_seconds, status,
              total_objects, success_objects, failed_objects,
              environment, created_at)
             VALUES
             ('{safe_run_id}', '{safe_pid}', {job_id_val}, {job_run_id_val},
-             '{safe_trigger}', current_timestamp(), NULL, NULL, '{Status.RUNNING}',
+             '{safe_trigger}', '{safe_triggered_mode}', current_timestamp(), NULL, NULL, '{Status.RUNNING}',
              NULL, NULL, NULL, '{safe_env}', current_timestamp())
         """
         spark.sql(query)
@@ -74,8 +76,7 @@ def log_run_start(
         return run_id
 
     except Exception as e:
-        logger.error( f"[pipeline={pipeline_id}, run={run_id}] Failed to log run start: {e}\n{traceback.format_exc()}")
-        raise AuditLogError(f"Failed to log run start for pipeline={pipeline_id}, run={run_id}: {e}") from e
+        _raise_error(logger, f"pipeline={pipeline_id}, run={run_id}", "Failed to log run start", e, AuditLogError)
 
 
 def log_run_end(
@@ -130,4 +131,4 @@ def log_run_end(
         logger.info( f"[run={run_id}] Run ended with status={status}")
 
     except Exception as e:
-        logger.warning( f"[run={run_id}] Failed to log run end: {e}\n{traceback.format_exc()}")
+        _swallow_error(logger, f"run={run_id}", "Failed to log run end", e)

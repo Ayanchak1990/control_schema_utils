@@ -209,6 +209,7 @@ class ControlSchemaClient:
         object_id: str,
         run_id: str,
         rows_loaded: int,
+        watermark_col= None,
         new_watermark=None,
     ) -> None:
         """
@@ -220,9 +221,9 @@ class ControlSchemaClient:
             object_id:      Source object identifier.
             run_id:         Current run identifier.
             rows_loaded:    Number of rows loaded in this run.
-            new_watermark:  MAX(watermark_column) captured from source before the read.
-                            Stored as last_run_ts so that the next incremental window
-                            starts from the actual data upper bound, not wall-clock time.
+            watermark_col:  Name of the watermark column used for this run.
+            new_watermark:  MAX(watermark_column) captured from source data.
+                            Stored in watermark_col_value; NULL when not supplied.
 
         Returns:
             None.
@@ -232,14 +233,16 @@ class ControlSchemaClient:
         """
         watermark_manager.update_watermark(
             self.spark, self.catalog, self.control_schema,
-            object_id, self.pipeline_id, run_id, rows_loaded, new_watermark
+            object_id, self.pipeline_id, run_id, rows_loaded,
+            watermark_col=watermark_col, new_watermark=new_watermark,
         )
 
     # ── Audit ────────────────────────────────────────────────────────────────
 
     def start_run(
         self,
-        triggered_by: str = "manual",
+        triggered_by: str = "unknown",
+        triggered_mode: str = "manual",
         job_id: Optional[str] = None,
         job_run_id: Optional[str] = None,
     ) -> str:
@@ -247,9 +250,10 @@ class ControlSchemaClient:
         INSERT row into job_run_audit with status='RUNNING'.
 
         Args:
-            triggered_by: Trigger type: 'schedule', 'manual', or 'api'.
-            job_id:       Optional Databricks job ID.
-            job_run_id:   Optional Databricks job run ID.
+            triggered_by:   Email of the user who triggered the run, or 'unknown'.
+            triggered_mode: 'schedule' if run via Databricks job, 'manual' otherwise.
+            job_id:         Optional Databricks job ID.
+            job_run_id:     Optional Databricks job run ID.
 
         Returns:
             run_id (UUID string).
@@ -259,7 +263,7 @@ class ControlSchemaClient:
         """
         return audit_logger.log_run_start(
             self.spark, self.catalog, self.control_schema,
-            self.pipeline_id, self.environment, triggered_by, job_id, job_run_id
+            self.pipeline_id, self.environment, triggered_by, triggered_mode, job_id, job_run_id
         )
 
     def end_run(
